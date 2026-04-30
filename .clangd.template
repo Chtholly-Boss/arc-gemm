@@ -1,0 +1,5 @@
+CompileFlags:
+  Add:
+    - -I__REPO_ROOT__/arc/include/
+    - -I__REPO_ROOT__/thirdparty/cutlass/include/
+    - -I__REPO_ROOT__/.venv/lib/python3.12/site-packages/tvm_ffi/include/
