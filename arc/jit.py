@@ -94,9 +94,7 @@ def _resolve_impl_path(
         return path.resolve(strict=True)
 
     search_roots = [KERNEL_PATH]
-    search_roots.extend(
-        pathlib.Path(include_path) for include_path in (include_paths or DEFAULT_INCLUDE)
-    )
+    search_roots.extend(pathlib.Path(include_path) for include_path in (include_paths or DEFAULT_INCLUDE))
 
     searched = []
     for root in search_roots:
@@ -106,13 +104,7 @@ def _resolve_impl_path(
             return candidate.resolve(strict=True)
 
     searched_paths = ", ".join(str(path) for path in searched)
-    raise FileNotFoundError(
-        f"Cannot find JIT implementation file {impl_file}; searched: {searched_paths}"
-    )
-
-
-def _file_sha256(path: pathlib.Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    raise FileNotFoundError(f"Cannot find JIT implementation file {impl_file}; searched: {searched_paths}")
 
 
 def _impl_label(path: pathlib.Path) -> str:
@@ -122,27 +114,24 @@ def _impl_label(path: pathlib.Path) -> str:
         return str(path)
 
 
-def impl_hash(
-    *impl_files: str | pathlib.Path,
+def hash_files(
+    *files: str | pathlib.Path,
     include_paths: List[str] | None = None,
 ) -> str:
-    """Return source-comment text that invalidates JIT caches on file edits."""
-    if not impl_files:
-        raise ValueError("At least one JIT implementation file is required")
+    """Return a stable digest for one or more files."""
+    if not files:
+        raise ValueError("At least one file is required")
 
     hasher = hashlib.sha256()
-    parts = []
-    for impl_file in impl_files:
-        path = _resolve_impl_path(impl_file, include_paths)
-        file_hash = _file_sha256(path)
+    for file in files:
+        path = _resolve_impl_path(file, include_paths)
         label = _impl_label(path)
         hasher.update(label.encode())
         hasher.update(b"\0")
-        hasher.update(file_hash.encode())
+        hasher.update(path.read_bytes())
         hasher.update(b"\0")
-        parts.append(f"{label}:{file_hash[:16]}")
 
-    return f"arc-jit-impls {hasher.hexdigest()[:16]} [{', '.join(parts)}]"
+    return hasher.hexdigest()[:16]
 
 
 class CPPArgList(list[str]):
@@ -246,7 +235,7 @@ def load_jit(
             raise ValueError(f"Dependency {dep} is not registered.")
         extra_include_paths += _REGISTERED_DEPENDENCIES[dep]()
 
-    module_name = "sgl_kernel_jit_" + "_".join(str(arg) for arg in args)
+    module_name = "arc_jit_" + "_".join(str(arg) for arg in args)
     if header_only:
         cpp_wrappers = cpp_wrappers or []
         cuda_wrappers = cuda_wrappers or []
@@ -306,7 +295,7 @@ def _init_jit_cuda_arch_once():
     except Exception:
         logger.warning("Cannot detect CUDA architecture.")
         major, minor = 0, 0  # invalid value to trigger compile error if used
-    _CUDA_ARCH = ArchInfo(major, minor, "")
+    _CUDA_ARCH = ArchInfo(major, minor, "f" if major >= 10 else "")
 
 
 @contextmanager

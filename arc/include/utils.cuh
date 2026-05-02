@@ -9,6 +9,16 @@
 
 namespace arc {
 
+template <bool UseGlobalTimer> CUTLASS_DEVICE uint64_t timestamp() {
+  uint64_t t;
+  if constexpr (UseGlobalTimer) {
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  } else {
+    asm volatile("mov.u64 %0, %%clock64;" : "=l"(t));
+  }
+  return t;
+}
+
 inline void
 make_2d_tma_desc(cute::TmaDescriptor *desc, void *ptr, uint64_t height,
                  uint64_t width, uint32_t box_height, uint32_t box_width,

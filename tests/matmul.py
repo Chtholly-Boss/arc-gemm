@@ -27,10 +27,20 @@ def _make_inputs(
     return a, b
 
 
+def _flush_l2() -> None:
+    flush = torch.empty(int(8e9 // 4), dtype=torch.int, device="cuda")
+    flush.zero_()
+    torch.cuda.synchronize()
+    del flush
+
+
 @app.command()
-def check(m: int = 128, n: int = 128, k: int = 1536, seed: int = 0) -> None:
-    assert (m, n, k) == (128, 128, 1536), "matmul smoke check is pinned to m=n=128, k=1536"
+def check(m: int = 256, n: int = 128, k: int = 1536, seed: int = 0) -> None:
+    assert (m, n, k) == (256, 128, 1536), (
+        "matmul smoke check is pinned to m=256, n=128, k=1536"
+    )
     a, b = _make_inputs(m, n, k, seed=seed)
+    _flush_l2()
     out = matmul(a, b)
     ref = torch.mm(a, b.T)
     torch.testing.assert_close(out, ref, rtol=0, atol=0)
@@ -38,13 +48,15 @@ def check(m: int = 128, n: int = 128, k: int = 1536, seed: int = 0) -> None:
 
 @app.command()
 def bench(
-    m: int = 128,
+    m: int = 256,
     n: int = 128,
     k: int = 1536,
     warm_up_runs: int = 5,
     timed_runs: int = 30,
 ) -> None:
-    assert (m, n, k) == (128, 128, 1536), "matmul benchmark is pinned to m=n=128, k=1536"
+    assert (m, n, k) == (256, 128, 1536), (
+        "matmul benchmark is pinned to m=256, n=128, k=1536"
+    )
     a, b = _make_inputs(m, n, k)
     out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
 
