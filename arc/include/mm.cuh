@@ -1,14 +1,10 @@
 #pragma once
 
-// Thor Peak BF16 256FLOPS
-// with 20 SMs -> 12.95 TFLOPS / SM
-
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/arch/copy_sm90_tma.hpp"
 #include "cute/arch/mma_sm100_desc.hpp"
 #include "cute/arch/tmem_allocator_sm100.hpp"
 #include "cutlass/arch/barrier.h"
-#include "cutlass/arch/reg_reconfig.h"
 #include "cutlass/bfloat16.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
@@ -27,12 +23,12 @@ struct SharedStorage {
   cutlass::arch::ClusterBarrier tma_empty[kNumStages];
   cutlass::arch::ClusterBarrier umma_done;
   alignas(16) uint32_t tmem_ptr;
-  uint64_t clocks[8][16]; // [warp_idx][reg_idx] for profiling usage
+  uint64_t clocks[8][32]; // [warp_idx][reg_idx] for profiling usage
 };
 
 template <uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K,
           uint32_t kNumStages, uint32_t kNumMulticast, uint32_t kNumThreads>
-CUTLASS_GLOBAL void __cluster_dims__(2, 1, 1) __launch_bounds__(kNumThreads)
+CUTLASS_GLOBAL void __launch_bounds__(kNumThreads)
     gemm_tcgen05_impl(__grid_constant__ const cute::TmaDescriptor a_desc,
                       __grid_constant__ const cute::TmaDescriptor b_desc,
                       __grid_constant__ const cute::TmaDescriptor cd_desc,
@@ -47,6 +43,7 @@ CUTLASS_GLOBAL void __cluster_dims__(2, 1, 1) __launch_bounds__(kNumThreads)
   auto __sync_cluster = [&]() {
     kNumMulticast > 1 ? cute::cluster_sync() : __syncthreads();
   };
+  auto tick = timestamp<true>;
 
   constexpr uint32_t kTmaAtomK = 128 / sizeof(cutlass::bfloat16_t);
   constexpr uint32_t kUmmaK = 32 / sizeof(cutlass::bfloat16_t);
@@ -57,8 +54,6 @@ CUTLASS_GLOBAL void __cluster_dims__(2, 1, 1) __launch_bounds__(kNumThreads)
   static_assert(Allocator::ColumnsPerAllocationSlice <= kNumTmemCols &&
                 kNumTmemCols <= Allocator::Sm100TmemCapacityColumns);
 
-  constexpr uint32_t kNonEpilogueRegs = 40;
-  constexpr uint32_t kEpilogueRegs = 232;
   static_assert(kNumThreads % 128 == 0);
   static_assert(BLOCK_M == BLOCK_N,
                 "Transposed TMEM epilogue demo assumes a square output tile");
@@ -67,10 +62,12 @@ CUTLASS_GLOBAL void __cluster_dims__(2, 1, 1) __launch_bounds__(kNumThreads)
   auto const warp_idx = cutlass::canonical_warp_idx_sync();
   auto const lane_idx = cutlass::canonical_lane_idx();
   auto const bidx = blockIdx.x;
+  auto const bidy = blockIdx.y;
   // Prologue
   {
     if (warp_idx == 0) {
       if (cute::elect_one_sync()) {
+        smem->clocks[7][31] = tick();
         cute::prefetch_tma_descriptor(&a_desc);
         cute::prefetch_tma_descriptor(&b_desc);
         cute::prefetch_tma_descriptor(&cd_desc);
@@ -102,11 +99,10 @@ CUTLASS_GLOBAL void __cluster_dims__(2, 1, 1) __launch_bounds__(kNumThreads)
 
   // Tma Load
   if (warp_idx == 0) {
-    cutlass::arch::warpgroup_reg_dealloc<kNonEpilogueRegs>();
     if (cute::elect_one_sync()) {
       for (uint32_t kidx = 0; kidx < total_k_blocks; advance_pipeline(kidx)) {
         smem->tma_empty[stage].wait(phase ^ 1);
-        smem->clocks[warp_idx][kidx] = clock64();
+        smem->clocks[warp_idx][kidx] = tick();
         smem->tma_full[stage].arrive_and_expect_tx(
             (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(cutlass::bfloat16_t));
         CUTLASS_PRAGMA_UNROLL
@@ -120,18 +116,17 @@ CUTLASS_GLOBAL void __cluster_dims__(2, 1, 1) __launch_bounds__(kNumThreads)
               &b_desc, reinterpret_cast<uint64_t *>(&smem->tma_full[stage]),
               static_cast<uint64_t>(cute::TMA::CacheHintSm100::EVICT_NORMAL),
               smem->b[stage] + i * BLOCK_N * kTmaAtomK,
-              kidx * BLOCK_K + i * kTmaAtomK, 0);
+              kidx * BLOCK_K + i * kTmaAtomK, bidy * BLOCK_N);
         }
       }
     }
   }
   // Umma
   else if (warp_idx == 1) {
-    cutlass::arch::warpgroup_reg_dealloc<kNonEpilogueRegs>();
     auto idesc = Mma::idesc();
     for (uint32_t kidx = 0; kidx < total_k_blocks; advance_pipeline(kidx)) {
       smem->tma_full[stage].wait(phase);
-      smem->clocks[warp_idx][kidx] = clock64();
+      smem->clocks[warp_idx][kidx] = tick();
       for (uint32_t k_inner = 0; k_inner < BLOCK_K / kUmmaK; ++k_inner) {
         uint32_t tile_k = k_inner * kUmmaK;
         auto desc_a = make_umma_smem_desc_swizzle128B<BLOCK_M, BLOCK_K>(
@@ -151,17 +146,15 @@ CUTLASS_GLOBAL void __cluster_dims__(2, 1, 1) __launch_bounds__(kNumThreads)
   }
   // Pad to warpgroup size for register reconfiguration
   else if (warp_idx < 4) {
-    cutlass::arch::warpgroup_reg_dealloc<kNonEpilogueRegs>();
   }
   // Epilogue
   else {
     constexpr uint32_t kEpilogueWarps = 4;
     constexpr uint32_t kRowsPerTmemLoad = 32;
     static_assert(BLOCK_M % kRowsPerTmemLoad == 0);
-    cutlass::arch::warpgroup_reg_alloc<kEpilogueRegs>();
     uint32_t __warp_idx = warp_idx % kEpilogueWarps;
     smem->umma_done.wait(0);
-    smem->clocks[warp_idx][0] = clock64();
+    smem->clocks[warp_idx][0] = tick();
     uint32_t n_idx = __warp_idx * 32 + lane_idx;
     cute::tma_store_fence();
     CUTLASS_PRAGMA_UNROLL
@@ -176,20 +169,32 @@ CUTLASS_GLOBAL void __cluster_dims__(2, 1, 1) __launch_bounds__(kNumThreads)
       }
       cutlass::arch::NamedBarrier::sync(128, 0);
       if (__warp_idx == 0 && cute::elect_one_sync()) {
-        cute::SM90_TMA_STORE_2D::copy(&cd_desc, smem->cd + m_base * BLOCK_N, 0,
-                                      bidx * BLOCK_M + m_base);
+        cute::SM90_TMA_STORE_2D::copy(&cd_desc, smem->cd + m_base * BLOCK_N,
+                                      bidy * BLOCK_N, bidx * BLOCK_M + m_base);
       }
     }
     if (__warp_idx == 0 && cute::elect_one_sync()) {
       cute::tma_store_arrive();
       cute::tma_store_wait<0>();
     }
-    smem->clocks[warp_idx][1] = clock64();
+    smem->clocks[warp_idx][1] = tick();
   }
   __sync_cluster();
   if (warp_idx == 0) {
     Allocator().free(smem->tmem_ptr, kNumTmemCols);
   }
+#if 0
+  if (threadIdx.x == 0) {
+    auto clocks = smem->clocks;
+    BLOG("|S %lu\n", clocks[7][31]);
+    for (uint32_t i = 0; i < total_k_blocks; ++i) {
+      BLOG(" MMA %u: %lu\n", i, smem->clocks[1][i]);
+    }
+    BLOG(" Epilogue S: %lu\n", clocks[4][0]);
+    BLOG("E|: %lu\n", clocks[4][1]);
+  }
+#endif
+
 #else
   CUTE_INVALID_CONTROL_PATH("Error: TCGEN05 Required");
 #endif

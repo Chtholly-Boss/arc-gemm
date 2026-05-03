@@ -1,170 +1,203 @@
-"""
-Adapted From https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/testing/bench.py
-"""
+from __future__ import annotations
 
-import os
-import sys
+import math
+import statistics
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
+
 import torch
-from typing import Callable, Optional
 
 
-def bench(
-    fn,
-    num_warmups: int = 5,
-    num_tests: int = 10,
-    high_precision: bool = False,
-    flush_l2: bool = False,
-):
+ReturnMode = str
+
+_RETURN_MODES = {"min", "max", "mean", "median", "all"}
+_DEFAULT_CACHE_SIZE_BYTES = 256 * 1024 * 1024
+
+
+def _quantile(values: Sequence[float], quantiles: Sequence[float]) -> list[float]:
+    sorted_values = sorted(values)
+    n = len(sorted_values)
+
+    def compute(q: float) -> float:
+        if not 0 <= q <= 1:
+            raise ValueError("Quantiles must be in the range [0, 1]")
+        point = q * (n - 1)
+        lower = math.floor(point)
+        upper = math.ceil(point)
+        fraction = point - lower
+        return (1 - fraction) * sorted_values[lower] + fraction * sorted_values[upper]
+
+    return [compute(q) for q in quantiles]
+
+
+def _summarize_statistics(
+    times: Sequence[float],
+    quantiles: Sequence[float] | None,
+    return_mode: ReturnMode,
+) -> float | list[float]:
+    if return_mode not in _RETURN_MODES:
+        raise ValueError(f"return_mode must be one of {sorted(_RETURN_MODES)}, got {return_mode!r}")
+    if not times:
+        raise ValueError("Benchmark produced no timing samples")
+
+    if quantiles is not None:
+        ret = _quantile(times, quantiles)
+        return ret[0] if len(ret) == 1 else ret
+    if return_mode == "all":
+        return list(times)
+    if return_mode == "min":
+        return min(times)
+    if return_mode == "max":
+        return max(times)
+    if return_mode == "mean":
+        return statistics.mean(times)
+    if return_mode == "median":
+        return statistics.median(times)
+    raise AssertionError(f"unreachable return_mode: {return_mode}")
+
+
+def _iter_tensors(tensors: Iterable[torch.Tensor] | torch.Tensor | None) -> Iterable[torch.Tensor]:
+    if tensors is None:
+        return ()
+    if isinstance(tensors, torch.Tensor):
+        return (tensors,)
+    return tensors
+
+
+def _detach_and_clear_grads(tensors: Iterable[torch.Tensor] | torch.Tensor | None) -> None:
+    for tensor in _iter_tensors(tensors):
+        tensor.detach_()
+        tensor.requires_grad_(True)
+        tensor.grad = None
+
+
+def _clear_grads(tensors: Iterable[torch.Tensor] | torch.Tensor | None) -> None:
+    for tensor in _iter_tensors(tensors):
+        tensor.grad = None
+
+
+def _repeat_for_duration(duration_ms: int | float, estimate_ms: float, fallback: int = 1000) -> int:
+    if estimate_ms <= 0:
+        return fallback
+    return max(1, int(duration_ms / estimate_ms))
+
+
+def _get_empty_cache_for_benchmark() -> torch.Tensor:
+    return torch.empty(_DEFAULT_CACHE_SIZE_BYTES // 4, dtype=torch.int, device="cuda")
+
+
+def _clear_cache(cache: torch.Tensor) -> None:
+    cache.zero_()
+
+
+def do_bench(
+    fn: Callable[[], Any],
+    warmup: int = 25,
+    rep: int = 100,
+    grad_to_none: Iterable[torch.Tensor] | torch.Tensor | None = None,
+    quantiles: Sequence[float] | None = None,
+    return_mode: ReturnMode = "mean",
+) -> float | list[float]:
+    """
+    Benchmark ``fn`` with CUDA events.
+
+    ``warmup`` and ``rep`` are target durations in milliseconds. The returned
+    timings are also in milliseconds, matching ``triton.testing.do_bench``.
+    """
+    if return_mode not in _RETURN_MODES:
+        raise ValueError(f"return_mode must be one of {sorted(_RETURN_MODES)}, got {return_mode!r}")
+
+    fn()
     torch.cuda.synchronize()
 
-    # Warmup
-    for _ in range(num_warmups):
-        fn()
-
-    # Add a large kernel to eliminate the CPU launch overhead
-    if high_precision:
-        x = torch.randn((8192, 8192), dtype=torch.float, device="cuda")
-        y = torch.randn((8192, 8192), dtype=torch.float, device="cuda")
-        x @ y
-
-    flush_l2_size = int(8e9 // 4)
-
-    if flush_l2:
-        total_elapsed_ms = 0.0
-        for _ in range(num_tests):
-            torch.empty(flush_l2_size, dtype=torch.int, device="cuda").zero_()
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-            fn()
-            end_event.record()
-            end_event.synchronize()
-            total_elapsed_ms += start_event.elapsed_time(end_event)
-        return total_elapsed_ms / num_tests / 1e3
+    cache = _get_empty_cache_for_benchmark()
 
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
-    for _ in range(num_tests):
+    for _ in range(5):
+        _clear_cache(cache)
         fn()
     end_event.record()
     torch.cuda.synchronize()
+    estimate_ms = start_event.elapsed_time(end_event) / 5
 
-    return start_event.elapsed_time(end_event) / num_tests / 1e3
+    n_warmup = _repeat_for_duration(warmup, estimate_ms)
+    n_repeat = _repeat_for_duration(rep, estimate_ms)
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
 
+    for _ in range(n_warmup):
+        fn()
 
-class empty_suppress:
-    def __enter__(self):
-        return self
+    for i in range(n_repeat):
+        _clear_grads(grad_to_none)
+        _clear_cache(cache)
+        start_events[i].record()
+        fn()
+        end_events[i].record()
 
-    def __exit__(self, *_):
-        pass
-
-
-class suppress_stdout_stderr:
-    def __enter__(self):
-        self.outnull_file = open(os.devnull, "w")
-        self.errnull_file = open(os.devnull, "w")
-
-        self.old_stdout_fileno_undup = sys.stdout.fileno()
-        self.old_stderr_fileno_undup = sys.stderr.fileno()
-
-        self.old_stdout_fileno = os.dup(sys.stdout.fileno())
-        self.old_stderr_fileno = os.dup(sys.stderr.fileno())
-
-        self.old_stdout = sys.stdout
-        self.old_stderr = sys.stderr
-
-        os.dup2(self.outnull_file.fileno(), self.old_stdout_fileno_undup)
-        os.dup2(self.errnull_file.fileno(), self.old_stderr_fileno_undup)
-
-        sys.stdout = self.outnull_file
-        sys.stderr = self.errnull_file
-        return self
-
-    def __exit__(self, *_):
-        sys.stdout = self.old_stdout
-        sys.stderr = self.old_stderr
-
-        os.dup2(self.old_stdout_fileno, self.old_stdout_fileno_undup)
-        os.dup2(self.old_stderr_fileno, self.old_stderr_fileno_undup)
-
-        os.close(self.old_stdout_fileno)
-        os.close(self.old_stderr_fileno)
-
-        self.outnull_file.close()
-        self.errnull_file.close()
+    torch.cuda.synchronize()
+    times = [start.elapsed_time(end) for start, end in zip(start_events, end_events)]
+    return _summarize_statistics(times, quantiles, return_mode)
 
 
-def bench_kineto(
-    fn,
-    kernel_names,
-    num_tests: int = 30,
-    suppress_kineto_output: bool = False,
-    trace_path: str = None,
-    flush_l2: bool = True,
-    with_multiple_kernels: bool = False,
-    barrier: Optional[Callable] = None,
-):
-    assert isinstance(kernel_names, str) or isinstance(kernel_names, tuple)
-    is_tuple = isinstance(kernel_names, tuple)
+def do_bench_cudagraph(
+    fn: Callable[[], Any],
+    rep: int = 20,
+    timed_runs: int | None = None,
+    grad_to_none: Iterable[torch.Tensor] | torch.Tensor | None = None,
+    quantiles: Sequence[float] | None = None,
+    return_mode: ReturnMode = "mean",
+) -> float | list[float]:
+    """
+    Benchmark ``fn`` by replaying a CUDA graph.
 
-    # Skip profiling
-    # Conflict with Nsight Systems, Nsight Compute and Compute Sanitizer
-    if int(os.environ.get("DG_USE_NVIDIA_TOOLS", 0)):
-        return (1,) * len(kernel_names) if is_tuple else 1
+    ``rep`` is the target graph replay duration in milliseconds when
+    ``timed_runs`` is not set. If ``timed_runs`` is set, it is the exact number
+    of ``fn`` calls captured in the CUDA graph. The returned timings are
+    milliseconds per ``fn`` call. One untimed graph replay is run before
+    sampling to remove first-replay overhead.
+    """
+    if return_mode not in _RETURN_MODES:
+        raise ValueError(f"return_mode must be one of {sorted(_RETURN_MODES)}, got {return_mode!r}")
+    if timed_runs is not None and timed_runs <= 0:
+        raise ValueError(f"timed_runs must be positive, got {timed_runs}")
 
-    # By default, flush L2 with an excessive 8 GB memset to give the GPU some (literal) chill time without full idle
-    flush_l2_size = int(8e9 // 4)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        fn()
+        _detach_and_clear_grads(grad_to_none)
 
-    # For some auto-tuning kernels with prints
-    fn()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for _ in range(5):
+            fn()
+        end_event.record()
+        torch.cuda.synchronize()
+        estimate_ms = start_event.elapsed_time(end_event) / 5
 
-    # Profile
-    suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
-    with suppress():
-        schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
-        profiler = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule, acc_events=True)
-        with profiler:
-            for i in range(2):
-                for _ in range(num_tests):
-                    if flush_l2:
-                        torch.empty(flush_l2_size, dtype=torch.int, device="cuda").zero_()
-                    if barrier is not None:
-                        # NOTES: use a large kernel and a barrier to eliminate the unbalanced CPU launch overhead
-                        # noinspection PyProtectedMember
-                        torch.cuda._sleep(int(2e7))  # ~10ms
-                        barrier()
-                    fn()
-                torch.cuda.synchronize()
-                profiler.step()
+        n_repeat = timed_runs if timed_runs is not None else _repeat_for_duration(rep, estimate_ms)
 
-    # Parse the profiling table
-    prof_lines = profiler.key_averages().table(sort_by="cuda_time_total", max_name_column_width=100).split("\n")
-    kernel_names = (kernel_names,) if isinstance(kernel_names, str) else kernel_names
-    if not with_multiple_kernels:
-        for name in kernel_names:
-            assert sum([name in line for line in prof_lines]) <= 1, f"Errors of the kernel {name} in the profiling table {prof_lines}"
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            for _ in range(n_repeat):
+                _clear_grads(grad_to_none)
+                fn()
+        torch.cuda.synchronize()
 
-    # Save chrome traces
-    if trace_path is not None:
-        profiler.export_chrome_trace(trace_path)
+        graph.replay()
+        torch.cuda.synchronize()
 
-    # Return average kernel times
-    units = {"ms": 1e3, "us": 1e6}
-    kernel_times = []
-    for name in kernel_names:
-        total_time = 0
-        total_num = 0
-        for line in prof_lines:
-            if name in line:
-                time_str = line.split()[-2]
-                num_str = line.split()[-1]
-                for unit, scale in units.items():
-                    if unit in time_str:
-                        total_time += float(time_str.replace(unit, "")) / scale * int(num_str)
-                        total_num += int(num_str)
-                        break
-        kernel_times.append(total_time / total_num if total_num > 0 else 0)
+        times = []
+        for _ in range(10):
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            graph.replay()
+            end_event.record()
+            torch.cuda.synchronize()
+            times.append(start_event.elapsed_time(end_event) / n_repeat)
 
-    return tuple(kernel_times) if is_tuple else kernel_times[0]
+    return _summarize_statistics(times, quantiles, return_mode)

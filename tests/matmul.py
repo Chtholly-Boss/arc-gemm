@@ -4,10 +4,14 @@ import typer
 import torch
 
 from arc import matmul
-from arc.testing.bench import bench_kineto
+from arc.testing.bench import do_bench
 
 
 app = typer.Typer()
+
+
+def _check_shape(m: int, n: int, k: int) -> None:
+    assert m % 128 == 0 and n % 128 == 0 and k % 128 == 0, "matmul test expects m, n, and k to be multiples of 128"
 
 
 def _make_inputs(
@@ -36,9 +40,7 @@ def _flush_l2() -> None:
 
 @app.command()
 def check(m: int = 256, n: int = 128, k: int = 1536, seed: int = 0) -> None:
-    assert (m, n, k) == (256, 128, 1536), (
-        "matmul smoke check is pinned to m=256, n=128, k=1536"
-    )
+    _check_shape(m, n, k)
     a, b = _make_inputs(m, n, k, seed=seed)
     _flush_l2()
     out = matmul(a, b)
@@ -48,37 +50,40 @@ def check(m: int = 256, n: int = 128, k: int = 1536, seed: int = 0) -> None:
 
 @app.command()
 def bench(
-    m: int = 256,
+    m: int = 128,
     n: int = 128,
     k: int = 1536,
-    warm_up_runs: int = 5,
-    timed_runs: int = 30,
+    profile: bool = False,
 ) -> None:
-    assert (m, n, k) == (256, 128, 1536), (
-        "matmul benchmark is pinned to m=256, n=128, k=1536"
-    )
+    _check_shape(m, n, k)
     a, b = _make_inputs(m, n, k)
     out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+    out_torch = torch.empty_like(out)
+    out_arc = torch.empty_like(out)
 
-    def measure(fn, kernel_name: str) -> tuple[float, float]:
-        for _ in range(warm_up_runs):
-            fn()
+    if profile:
+        _flush_l2()
+        matmul(a, b, out=out)
         torch.cuda.synchronize()
+        return
 
-        elapsed_s = bench_kineto(
-            fn,
-            kernel_name,
-            num_tests=timed_runs,
-            suppress_kineto_output=True,
-            flush_l2=True,
-        )
-        if elapsed_s <= 0:
-            raise RuntimeError(f"Kineto did not find kernel matching {kernel_name!r}")
-        tflops = 2 * m * n * k / elapsed_s / 1e12
-        return elapsed_s, tflops
+    flops = 2 * m * n * k
+    bytes_ = (m * k + n * k + m * n) * a.element_size()
 
-    arc_time_s, arc_tflops = measure(lambda: matmul(a, b, out=out), "gemm_tcgen05_impl")
-    typer.echo(f"arc.matmul [{m}x{n}x{k}]: {arc_time_s * 1e6:.3f} us, {arc_tflops:.3f} TFLOP/s")
+    def measure(fn, name: str) -> float:
+        elapsed_ms = do_bench(fn, warmup=100, rep=500)
+        assert isinstance(elapsed_ms, float)
+        tflops = flops / (elapsed_ms / 1e3) / 1e12
+        gbps = bytes_ / (elapsed_ms / 1e3) / 1e9
+        typer.echo(f"{name:<{24}} [{m}x{n}x{k}]: {elapsed_ms:7.3f} ms, {tflops:7.3f} TFLOP/s, {gbps:7.3f} GB/s")
+
+    measure(lambda: torch.mm(a, b.T, out=out_torch), "torch.mm")
+    measure(lambda: matmul(a, b, out=out_arc), "arc.matmul")
+
+    # import deep_gemm
+
+    # out_deep_gemm = torch.empty_like(out)
+    # measure(lambda: deep_gemm.bf16_gemm_nt(a, b, out_deep_gemm), "deep_gemm.bf16_gemm_nt")
 
 
 if __name__ == "__main__":

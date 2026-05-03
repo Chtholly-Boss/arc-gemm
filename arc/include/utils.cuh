@@ -8,17 +8,6 @@
 #include "cutlass/detail/helper_macros.hpp"
 
 namespace arc {
-
-template <bool UseGlobalTimer> CUTLASS_DEVICE uint64_t timestamp() {
-  uint64_t t;
-  if constexpr (UseGlobalTimer) {
-    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
-  } else {
-    asm volatile("mov.u64 %0, %%clock64;" : "=l"(t));
-  }
-  return t;
-}
-
 inline void
 make_2d_tma_desc(cute::TmaDescriptor *desc, void *ptr, uint64_t height,
                  uint64_t width, uint32_t box_height, uint32_t box_width,
@@ -31,7 +20,7 @@ make_2d_tma_desc(cute::TmaDescriptor *desc, void *ptr, uint64_t height,
   CHECK_CUDRV_ERROR(cuTensorMapEncodeTiled(
       desc, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, rank, ptr, globalDim,
       globalStrides, boxDim, elementStrides, CU_TENSOR_MAP_INTERLEAVE_NONE,
-      swizzle, CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      swizzle, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
       CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
 

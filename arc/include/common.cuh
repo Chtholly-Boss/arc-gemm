@@ -26,3 +26,25 @@
       exit(EXIT_FAILURE);                                                      \
     }                                                                          \
   } while (0)
+
+template <bool UseGlobalTimer> __device__ __forceinline__ uint64_t timestamp() {
+  uint64_t t;
+  if constexpr (UseGlobalTimer) {
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  } else {
+    asm volatile("mov.u64 %0, %%clock64;" : "=l"(t));
+  }
+  return t;
+}
+
+__device__ __forceinline__ uint32_t __smid() {
+  uint32_t smid;
+  asm volatile("mov.u32 %0, %%smid;" : "=r"(smid));
+  return smid;
+}
+
+#define BLOG(fmt, ...)                                                         \
+  printf("#P[%u]#B[%u,%u,%u] " fmt, __smid(), blockIdx.x, blockIdx.y,          \
+         blockIdx.z, ##__VA_ARGS__)
+#define TLOG(fmt, ...)                                                         \
+  printf("#B[%u]T[%u] " fmt, blockIdx.x, threadIdx.x, ##__VA_ARGS__)
