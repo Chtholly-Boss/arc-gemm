@@ -4,31 +4,24 @@ import typer
 import torch
 
 from arc import matmul
-from arc.testing.bench import do_bench
+from arc.math import count_bytes
+from arc.testing.bench import do_bench_kineto
 
 
 app = typer.Typer()
 
 
-def _check_shape(m: int, n: int, k: int) -> None:
-    assert m % 128 == 0 and n % 128 == 0 and k % 128 == 0, "matmul test expects m, n, and k to be multiples of 128"
-
-
-def _make_inputs(
+def generate_data(
     m: int,
     n: int,
     k: int,
-    layout: str = "nt",
     seed: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if layout[0] not in "nt" or layout[1] not in "nt":
-        raise ValueError(f"Invalid layout: {layout}")
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     torch.manual_seed(seed)
-    shape_a = (m, k) if layout[0] == "n" else (k, m)
-    shape_b = (k, n) if layout[1] == "n" else (n, k)
-    a = torch.randn(shape_a, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(shape_b, device="cuda", dtype=torch.bfloat16)
-    return a, b
+    a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16)
+    b = torch.randn((n, k), device="cuda", dtype=torch.bfloat16)
+    ref = torch.mm(a.float(), b.float().T)
+    return a, b, ref
 
 
 def _flush_l2() -> None:
@@ -38,52 +31,54 @@ def _flush_l2() -> None:
     del flush
 
 
-@app.command()
-def check(m: int = 256, n: int = 128, k: int = 1536, seed: int = 0) -> None:
-    _check_shape(m, n, k)
-    a, b = _make_inputs(m, n, k, seed=seed)
+@app.command(no_args_is_help=True)
+def check(
+    m: int,
+    n: int,
+    k: int,
+    seed: int = 0,
+) -> None:
+    a, b, ref = generate_data(m, n, k, seed=seed)
     _flush_l2()
     out = matmul(a, b)
-    ref = torch.mm(a, b.T)
-    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+    torch.testing.assert_close(out.float(), ref)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def bench(
-    m: int = 128,
-    n: int = 128,
-    k: int = 1536,
-    profile: bool = False,
+    m: int,
+    n: int,
+    k: int,
+    once: bool = False,
 ) -> None:
-    _check_shape(m, n, k)
-    a, b = _make_inputs(m, n, k)
+    a, b, _ = generate_data(m, n, k)
     out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
     out_torch = torch.empty_like(out)
     out_arc = torch.empty_like(out)
+    out_deep_gemm = torch.empty_like(out)
 
-    if profile:
+    if once:
         _flush_l2()
         matmul(a, b, out=out)
         torch.cuda.synchronize()
         return
 
     flops = 2 * m * n * k
-    bytes_ = (m * k + n * k + m * n) * a.element_size()
+    bytes_ = count_bytes(a, b, out)
 
-    def measure(fn, name: str) -> float:
-        elapsed_ms = do_bench(fn, warmup=100, rep=500)
-        assert isinstance(elapsed_ms, float)
+    def measure(fn, kernel_names: str | tuple[str, ...], name: str) -> None:
+        elapsed = do_bench_kineto(fn, kernel_names, suppress_kineto_output=True)
+        elapsed_ms = sum(elapsed) if isinstance(elapsed, tuple) else elapsed
         tflops = flops / (elapsed_ms / 1e3) / 1e12
         gbps = bytes_ / (elapsed_ms / 1e3) / 1e9
         typer.echo(f"{name:<{24}} [{m}x{n}x{k}]: {elapsed_ms:7.3f} ms, {tflops:7.3f} TFLOP/s, {gbps:7.3f} GB/s")
 
-    measure(lambda: torch.mm(a, b.T, out=out_torch), "torch.mm")
-    measure(lambda: matmul(a, b, out=out_arc), "arc.matmul")
+    measure(lambda: torch.mm(a, b.T, out=out_torch), ("nvjet", "reduce"), "torch.mm")
+    measure(lambda: matmul(a, b, out=out_arc), "arc::gemm_tcgen05_impl", "arc.matmul")
 
-    # import deep_gemm
+    import deep_gemm
 
-    # out_deep_gemm = torch.empty_like(out)
-    # measure(lambda: deep_gemm.bf16_gemm_nt(a, b, out_deep_gemm), "deep_gemm.bf16_gemm_nt")
+    measure(lambda: deep_gemm.bf16_gemm_nt(a, b, out_deep_gemm), "bf16_gemm", "deep_gemm.bf16")
 
 
 if __name__ == "__main__":

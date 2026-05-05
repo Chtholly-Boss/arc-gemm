@@ -70,7 +70,7 @@ def matmul(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None) ->
     m, k = a.shape
     n, _k = b.shape
     assert k == _k, f"Inner dimensions must match: {k} vs {_k}"
-    assert m % 128 == 0 and n % 128 == 0 and k % 128 == 0, "matmul expects m, n, and k to be multiples of 128"
+    assert m % 32 == 0 and n % 128 == 0 and k % 128 == 0, "matmul expects m to be a multiple of 32, and n and k to be multiples of 128"
     if out is None:
         out = torch.empty((m, n), dtype=torch.bfloat16, device=a.device)
     _load_matmul().matmul(a, b, out)
