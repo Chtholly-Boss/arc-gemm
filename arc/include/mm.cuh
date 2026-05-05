@@ -4,6 +4,7 @@
 #include "cute/arch/copy_sm90_tma.hpp"
 #include "cute/arch/mma_sm100_desc.hpp"
 #include "cute/arch/tmem_allocator_sm100.hpp"
+#include "cute/numeric/math.hpp"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/bfloat16.h"
 #include "cutlass/cutlass.h"
@@ -36,6 +37,7 @@ CUTLASS_GLOBAL void __cluster_dims__(BPC, 1, 1) __launch_bounds__(TPB)
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000))
   static_assert(TPB % 128 == 0);
   static_assert(BN == 128);
+  static_assert(BM % 16 == 0);
 
   using a_type = cutlass::bfloat16_t;
   using b_type = cutlass::bfloat16_t;
@@ -44,7 +46,7 @@ CUTLASS_GLOBAL void __cluster_dims__(BPC, 1, 1) __launch_bounds__(TPB)
   auto constexpr a_major = cute::UMMA::Major::K;
   auto constexpr b_major = cute::UMMA::Major::K;
 
-  using Mma = MmaInstr<a_type, b_type, acc_type, BM, BN, a_major, b_major>;
+  using Mma = MmaInstr<a_type, b_type, acc_type, BN, BM, a_major, b_major>;
   constexpr uint32_t kUmmaK = 32 / sizeof(a_type);
   static_assert(BK % kUmmaK == 0);
 
@@ -54,14 +56,14 @@ CUTLASS_GLOBAL void __cluster_dims__(BPC, 1, 1) __launch_bounds__(TPB)
   auto const smem = reinterpret_cast<SharedStorage *>(__smem);
 
   using Allocator = cute::TMEM::Allocator1Sm;
-  constexpr uint32_t kNumTmemCols = BN * sizeof(float) / 4;
+  constexpr uint32_t kNumTmemCols = cute::bit_ceil(BM);
   static_assert(Allocator::ColumnsPerAllocationSlice <= kNumTmemCols &&
                 kNumTmemCols <= Allocator::Sm100TmemCapacityColumns);
 
   auto __sync_cluster = [&]() {
     BPC > 1 ? cute::cluster_sync() : __syncthreads();
   };
-  auto probe = timestamp<true>;
+  auto probe = timestamp<false>;
 
   auto const warp_idx = cutlass::canonical_warp_idx_sync();
   auto const lane_idx = cutlass::canonical_lane_idx();
