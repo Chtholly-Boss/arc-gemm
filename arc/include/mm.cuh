@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.cuh"
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/arch/copy_sm90_tma.hpp"
 #include "cute/arch/mma_sm100_desc.hpp"

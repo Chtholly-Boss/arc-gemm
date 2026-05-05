@@ -1,30 +1,11 @@
 #include "common.cuh"
 #include "cute/arch/cluster_sm90.hpp"
-#include "cute/arch/copy_sm90_desc.hpp"
 #include "cute/arch/copy_sm90_tma.hpp"
 #include "cutlass/arch/barrier.h"
+#include "ptx/tma.cuh"
 #include <cstdint>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
-
-inline void make_2d_tma_desc_u8(cute::TmaDescriptor *desc, void *ptr,
-                                uint64_t height, uint64_t width,
-                                uint32_t box_height, uint32_t box_width) {
-  constexpr uint32_t rank = 2;
-  uint64_t globalDim[rank] = {width, height};
-  uint64_t globalStrides[rank - 1] = {width};
-  uint32_t boxDim[rank] = {box_width, box_height};
-  uint32_t elementStrides[rank] = {1, 1};
-  // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html
-  // ! boxDim array, which specifies number of elements to be traversed along
-  // each of the tensorRank dimensions, must be non-zero and less than or equal
-  // to 256
-  CHECK_CUDRV_ERROR(cuTensorMapEncodeTiled(
-      desc, CU_TENSOR_MAP_DATA_TYPE_UINT8, rank, ptr, globalDim, globalStrides,
-      boxDim, elementStrides, CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
-}
 
 namespace arc::experiments {
 template <bool UseGlobalTimer>
@@ -47,7 +28,7 @@ tma_latency_impl(__grid_constant__ const cute::TmaDescriptor desc, uint32_t n,
   if (cute::elect_one_sync()) {
     probe(start);
     cute::set_barrier_transaction_bytes(barrier, bytes);
-    cute::SM90_TMA_LOAD_2D::copy(
+    cute::SM90_TMA_LOAD::copy(
         &desc, &barrier,
         static_cast<uint64_t>(cute::TMA::CacheHintSm100::EVICT_NORMAL), smem, 0,
         block_row);
@@ -58,7 +39,7 @@ tma_latency_impl(__grid_constant__ const cute::TmaDescriptor desc, uint32_t n,
 
     probe(start);
     cute::set_barrier_transaction_bytes(barrier, bytes);
-    cute::SM90_TMA_LOAD_2D::copy(
+    cute::SM90_TMA_LOAD::copy(
         &desc, &barrier,
         static_cast<uint64_t>(cute::TMA::CacheHintSm100::EVICT_NORMAL), smem, 0,
         block_row);
@@ -72,7 +53,7 @@ tma_latency_impl(__grid_constant__ const cute::TmaDescriptor desc, uint32_t n,
   if (cute::elect_one_sync()) {
     cute::tma_store_fence();
     probe(start);
-    cute::SM90_TMA_STORE_2D::copy(&desc, smem, 0, block_row);
+    cute::SM90_TMA_STORE::copy(&desc, smem, 0, block_row);
     cute::tma_store_arrive();
     cute::tma_store_wait<0>();
     probe(end);
@@ -83,13 +64,14 @@ tma_latency_impl(__grid_constant__ const cute::TmaDescriptor desc, uint32_t n,
 
 template <bool UseGlobalTimer>
 void tma_latency(tvm::ffi::Tensor input, tvm::ffi::Tensor latencies) {
-  auto num_sm = input.size(0);
-  auto num_rows = input.size(1);
-  auto num_cols = input.size(2);
+  uint32_t num_blocks = input.size(0);
+  uint32_t num_rows = input.size(1);
+  uint32_t num_cols = input.size(2);
 
   cute::TmaDescriptor desc;
-  make_2d_tma_desc_u8(&desc, input.data_ptr(), num_sm * num_rows, num_cols,
-                      num_rows, num_cols);
+  arc::tma::make_tma_desc(&desc, input.data_ptr(),
+                          {num_blocks * num_rows, num_cols},
+                          {num_rows, num_cols});
   cudaStream_t stream = static_cast<cudaStream_t>(
       TVMFFIEnvGetStream(input.device().device_type, input.device().device_id));
   int smem_size_used = 0;
@@ -101,7 +83,7 @@ void tma_latency(tvm::ffi::Tensor input, tvm::ffi::Tensor latencies) {
   CHECK_CUDA_ERROR(cudaFuncSetAttribute(
       tma_latency_impl<UseGlobalTimer>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_used));
-  tma_latency_impl<UseGlobalTimer><<<num_sm, 32, smem_size_used, stream>>>(
+  tma_latency_impl<UseGlobalTimer><<<num_blocks, 32, smem_size_used, stream>>>(
       desc, num_rows, num_rows * num_cols,
       static_cast<uint64_t *>(latencies.data_ptr()));
   CHECK_CUDA_ERROR(cudaGetLastError());

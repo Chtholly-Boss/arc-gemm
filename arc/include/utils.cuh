@@ -1,29 +1,10 @@
 #pragma once
 
-#include "common.cuh"
-#include "cute/arch/copy_sm90_desc.hpp"
 #include "cute/arch/mma_sm100_desc.hpp"
 #include "cute/arch/mma_sm100_umma.hpp"
 #include "cutlass/detail/helper_macros.hpp"
 
 namespace arc {
-inline void
-make_2d_tma_desc(cute::TmaDescriptor *desc, void *ptr, uint64_t height,
-                 uint64_t width, uint32_t box_height, uint32_t box_width,
-                 CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE) {
-  constexpr uint32_t rank = 2;
-  uint64_t globalDim[rank] = {width, height};
-  uint64_t globalStrides[rank - 1] = {width * sizeof(cutlass::bfloat16_t)};
-  uint32_t boxDim[rank] = {box_width, box_height};
-  uint32_t elementStrides[rank] = {1, 1};
-  CHECK_CUDRV_ERROR(cuTensorMapEncodeTiled(
-      desc, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, rank, ptr, globalDim,
-      globalStrides, boxDim, elementStrides, CU_TENSOR_MAP_INTERLEAVE_NONE,
-      swizzle, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
-      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
-}
-
-
 template <class a_type, class b_type, class c_type, int M, int N,
           cute::UMMA::Major a_major, cute::UMMA::Major b_major>
 struct MmaInstr {

@@ -16,13 +16,14 @@ from .jit import (
 
 def _instantiate(tiler: tuple[int, int, int], stages: int) -> str:
     bm, bn, bk = tiler
-    swizzle_k = 64
     multicast = 1
     num_threads = 256
+    swizzle_k = 64
     return f"""
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include <mm.cuh>
+#include <ptx/tma.cuh>
 
 namespace arc {{
 
@@ -31,9 +32,9 @@ void matmul(tvm::ffi::TensorView a, tvm::ffi::TensorView b, tvm::ffi::TensorView
     auto k = static_cast<uint32_t>(a.size(1));
     auto n = static_cast<uint32_t>(b.size(0)); // K-Major
     cute::TmaDescriptor a_desc, b_desc, cd_desc;
-    make_2d_tma_desc(&a_desc, a.data_ptr(), m, k, {bm}, {swizzle_k}, CU_TENSOR_MAP_SWIZZLE_128B);
-    make_2d_tma_desc(&b_desc, b.data_ptr(), n, k, {bn}, {swizzle_k}, CU_TENSOR_MAP_SWIZZLE_128B);
-    make_2d_tma_desc(&cd_desc, out.data_ptr(), m, n, 32, {bn}, CU_TENSOR_MAP_SWIZZLE_NONE);
+    tma::make_tma_desc<cutlass::bfloat16_t, 128, 16>(&a_desc, a.data_ptr(), {{m, k}}, {{{bm}, {swizzle_k}}});
+    tma::make_tma_desc<cutlass::bfloat16_t, 128, 16>(&b_desc, b.data_ptr(), {{n, k}}, {{{bn}, {swizzle_k}}});
+    tma::make_tma_desc<cutlass::bfloat16_t>(&cd_desc, out.data_ptr(), {{m, n}}, {{32, {bn}}});
     cudaStream_t stream = static_cast<cudaStream_t>(TVMFFIEnvGetStream(out.device().device_type, out.device().device_id));
     using SmemStorage = SharedStorage<{bm}, {bn}, {bk}, {stages}, cutlass::bfloat16_t, cutlass::bfloat16_t, cutlass::bfloat16_t>;
     constexpr int smem_size = sizeof(SmemStorage);
@@ -52,6 +53,7 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(matmul, (arc::matmul));
 def _load_matmul():
     source_hash = hash_files(
         "include/mm.cuh",
+        "include/ptx/tma.cuh",
         "include/utils.cuh",
         "include/common.cuh",
     )

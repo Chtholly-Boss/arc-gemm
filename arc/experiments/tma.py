@@ -9,7 +9,7 @@ from arc.jit import cache_once, hash_files, load_jit
 def _load_tma_latency():
     source_hash = hash_files(
         "csrc/tma.cu",
-        "include/utils.cuh",
+        "include/ptx/tma.cuh",
         "include/common.cuh",
     )
     return load_jit(

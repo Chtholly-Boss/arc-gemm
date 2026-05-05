@@ -20,7 +20,7 @@ def generate_data(
     torch.manual_seed(seed)
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16)
     b = torch.randn((n, k), device="cuda", dtype=torch.bfloat16)
-    ref = torch.mm(a.float(), b.float().T)
+    ref = torch.mm(a.float(), b.float().T).to(torch.bfloat16)
     return a, b, ref
 
 

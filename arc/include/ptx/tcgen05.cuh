@@ -2,7 +2,6 @@
 #include "cute/arch/copy_sm100.hpp"
 #include "cute/arch/mma_sm100_desc.hpp"
 #include "cute/arch/util.hpp"
-#include "cutlass/detail/helper_macros.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <utility>
@@ -130,41 +129,50 @@ template <> struct UTCStOpSelector<32, 32, 32> {
 };
 
 template <typename LdOp, uint32_t RepeatTimes, std::size_t... I>
-CUTLASS_DEVICE void utcld_impl(uint32_t src_addr, uint32_t (&r)[RepeatTimes],
-                               std::index_sequence<I...>) {
+__device__ void utcld_impl(uint32_t src_addr, uint32_t (&r)[RepeatTimes],
+                           std::index_sequence<I...>) {
   LdOp::copy(src_addr, r[I]...);
 }
 
 template <typename StOp, uint32_t RepeatTimes, std::size_t... I>
-CUTLASS_DEVICE void utcst_impl(uint32_t dst_addr,
-                               uint32_t const (&r)[RepeatTimes],
-                               std::index_sequence<I...>) {
+__device__ void utcst_impl(uint32_t dst_addr, uint32_t const (&r)[RepeatTimes],
+                           std::index_sequence<I...>) {
   StOp::copy(r[I]..., dst_addr);
 }
 } // namespace detail
 
 template <uint32_t Dp, uint32_t Bits>
-CUTLASS_DEVICE void utccp(uint32_t dst_addr, uint64_t src_desc) {
+__device__ void utccp(uint32_t dst_addr, uint64_t src_desc) {
   using CopyOp = typename detail::UTCCPOpSelector<Dp, Bits>::Op;
   CopyOp::copy(src_desc, dst_addr);
 }
 
 template <uint32_t Dp, uint32_t Bits, uint32_t RepeatTimes>
-CUTLASS_DEVICE void utcld(uint32_t src_addr, uint32_t (&r)[RepeatTimes]) {
+__device__ void utcld(uint32_t src_addr, uint32_t (&r)[RepeatTimes]) {
   using LdOp = typename detail::UTCLdOpSelector<Dp, Bits, RepeatTimes>::Op;
   detail::utcld_impl<LdOp>(src_addr, r,
                            std::make_index_sequence<RepeatTimes>{});
 }
 
 template <uint32_t Dp, uint32_t Bits, uint32_t RepeatTimes>
-CUTLASS_DEVICE void utcst(uint32_t dst_addr, uint32_t const (&r)[RepeatTimes]) {
+__device__ void utcst(uint32_t dst_addr, uint32_t const (&r)[RepeatTimes]) {
   using StOp = typename detail::UTCStOpSelector<Dp, Bits, RepeatTimes>::Op;
   detail::utcst_impl<StOp>(dst_addr, r,
                            std::make_index_sequence<RepeatTimes>{});
 }
 
 namespace detail {
-CUTLASS_DEVICE cute::UMMA::SmemDescriptor
+
+template <uint32_t kSwizzleBytes, uint32_t kAtomBytes>
+CUTE_HOST_DEVICE constexpr cute::UMMA::LayoutType to_UMMA_LayoutType() {
+  return kAtomBytes == 32       ? cute::UMMA::LayoutType::SWIZZLE_128B_BASE32B
+         : kSwizzleBytes == 128 ? cute::UMMA::LayoutType::SWIZZLE_128B
+         : kSwizzleBytes == 64  ? cute::UMMA::LayoutType::SWIZZLE_64B
+         : kSwizzleBytes == 32  ? cute::UMMA::LayoutType::SWIZZLE_32B
+                                : cute::UMMA::LayoutType::SWIZZLE_NONE;
+}
+
+__device__ cute::UMMA::SmemDescriptor
 make_smem_desc(cute::UMMA::LayoutType layout_type, void *smem_ptr, uint32_t sbo,
                uint32_t lbo) {
   cute::UMMA::SmemDescriptor desc;
@@ -183,18 +191,14 @@ make_smem_desc(cute::UMMA::LayoutType layout_type, void *smem_ptr, uint32_t sbo,
 // (BLOCK_MN, BK) -> (BK / _BK, BLOCK_MN, _BK)
 template <uint32_t BLOCK_MN, uint32_t BK, typename dtype_t,
           uint32_t kSwizzleBytes = 128, uint32_t kAtomBytes = 16>
-CUTLASS_DEVICE cute::UMMA::SmemDescriptor
+__device__ cute::UMMA::SmemDescriptor
 make_smem_desc(dtype_t *base, uint32_t mn_idx, uint32_t k_idx) {
 
   constexpr uint32_t _BK = kSwizzleBytes / sizeof(dtype_t);
   static_assert(BK % _BK == 0);
 
-  cute::UMMA::LayoutType layout =
-      kAtomBytes == 32       ? cute::UMMA::LayoutType::SWIZZLE_128B_BASE32B
-      : kSwizzleBytes == 128 ? cute::UMMA::LayoutType::SWIZZLE_128B
-      : kSwizzleBytes == 64  ? cute::UMMA::LayoutType::SWIZZLE_64B
-      : kSwizzleBytes == 32  ? cute::UMMA::LayoutType::SWIZZLE_32B
-                             : cute::UMMA::LayoutType::SWIZZLE_NONE;
+  auto constexpr layout =
+      detail::to_UMMA_LayoutType<kSwizzleBytes, kAtomBytes>();
 
   uint32_t k_slab = k_idx / _BK;
   uint32_t k_in_slab = k_idx % _BK;
