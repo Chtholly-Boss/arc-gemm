@@ -1,8 +1,8 @@
+#include "common.cuh"
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/arch/copy_sm90_desc.hpp"
 #include "cute/arch/copy_sm90_tma.hpp"
 #include "cutlass/arch/barrier.h"
-#include "utils.cuh"
 #include <cstdint>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
@@ -31,7 +31,7 @@ template <bool UseGlobalTimer>
 CUTLASS_GLOBAL void
 tma_latency_impl(__grid_constant__ const cute::TmaDescriptor desc, uint32_t n,
                  uint32_t bytes, uint64_t *latencies) {
-  auto record = timestamp<UseGlobalTimer>;
+  auto probe = timestamp<UseGlobalTimer>;
   extern __shared__ __align__(1024) uint8_t smem[];
   __shared__ uint64_t barrier;
   uint32_t block_row = blockIdx.x * n;
@@ -43,27 +43,27 @@ tma_latency_impl(__grid_constant__ const cute::TmaDescriptor desc, uint32_t n,
     cutlass::arch::fence_barrier_init();
   }
   __syncthreads();
-
+  uint64_t start = 0, end = 0;
   if (cute::elect_one_sync()) {
-    uint64_t start = record();
+    probe(start);
     cute::set_barrier_transaction_bytes(barrier, bytes);
     cute::SM90_TMA_LOAD_2D::copy(
         &desc, &barrier,
         static_cast<uint64_t>(cute::TMA::CacheHintSm100::EVICT_NORMAL), smem, 0,
         block_row);
     cute::wait_barrier(barrier, 0);
-    uint64_t end = record();
+    probe(end);
     block_latencies[0] = start;
     block_latencies[1] = end;
 
-    start = record();
+    probe(start);
     cute::set_barrier_transaction_bytes(barrier, bytes);
     cute::SM90_TMA_LOAD_2D::copy(
         &desc, &barrier,
         static_cast<uint64_t>(cute::TMA::CacheHintSm100::EVICT_NORMAL), smem, 0,
         block_row);
     cute::wait_barrier(barrier, 1);
-    end = record();
+    probe(end);
     block_latencies[2] = start;
     block_latencies[3] = end;
   }
@@ -71,11 +71,11 @@ tma_latency_impl(__grid_constant__ const cute::TmaDescriptor desc, uint32_t n,
 
   if (cute::elect_one_sync()) {
     cute::tma_store_fence();
-    uint64_t start = record();
+    probe(start);
     cute::SM90_TMA_STORE_2D::copy(&desc, smem, 0, block_row);
     cute::tma_store_arrive();
     cute::tma_store_wait<0>();
-    uint64_t end = record();
+    probe(end);
     block_latencies[4] = start;
     block_latencies[5] = end;
   }
@@ -99,8 +99,8 @@ void tma_latency(tvm::ffi::Tensor input, tvm::ffi::Tensor latencies) {
   smem_size_used -= 4096; // reserve some shared memory for other usages
 
   CHECK_CUDA_ERROR(cudaFuncSetAttribute(
-      tma_latency_impl<UseGlobalTimer>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-      smem_size_used));
+      tma_latency_impl<UseGlobalTimer>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_used));
   tma_latency_impl<UseGlobalTimer><<<num_sm, 32, smem_size_used, stream>>>(
       desc, num_rows, num_rows * num_cols,
       static_cast<uint64_t *>(latencies.data_ptr()));

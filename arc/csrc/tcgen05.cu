@@ -20,7 +20,7 @@ CUTLASS_GLOBAL void tcgen05_cp_impl(void *sink, uint64_t *latency) {
   static_assert(kIters > 0);
   static_assert(kIters <= Sm100TmemCapacityColumns / CpOp::kCols);
 
-  auto tick = timestamp<false>;
+  auto probe = timestamp<false>;
 
   extern __shared__ __align__(1024) uint8_t smem_matrix[];
   __shared__ uint32_t tmem_ptr;
@@ -33,12 +33,12 @@ CUTLASS_GLOBAL void tcgen05_cp_impl(void *sink, uint64_t *latency) {
   }
   __syncwarp();
 
-  uint64_t sdesc = make_umma_smem_desc(cute::UMMA::LayoutType::SWIZZLE_128B,
-                                       smem_matrix, 8 * 128, 16);
-  uint64_t start = 0;
+  uint64_t sdesc = tcgen05::detail::make_smem_desc(
+      cute::UMMA::LayoutType::SWIZZLE_128B, smem_matrix, 8 * 128, 16);
+  uint64_t start = 0, end = 0;
 
   if (cute::elect_one_sync()) {
-    start = tick();
+    probe(start);
     CUTLASS_PRAGMA_UNROLL
     for (uint32_t i = 0; i < kIters; ++i) {
       tcgen05::utccp<Dp, Bits>(tmem_ptr + i * CpOp::kCols, sdesc);
@@ -48,8 +48,9 @@ CUTLASS_GLOBAL void tcgen05_cp_impl(void *sink, uint64_t *latency) {
   cutlass::arch::umma_arrive(&barrier);
   if (cute::elect_one_sync()) {
     cute::wait_barrier(barrier, 0);
+    probe(end);
     latency[0] = start;
-    latency[1] = tick();
+    latency[1] = end;
   }
   __syncwarp();
 
@@ -78,7 +79,7 @@ CUTLASS_GLOBAL void tcgen05_ld_st_impl(void *sink, uint64_t *latency) {
   uint32_t warp_idx = cutlass::canonical_warp_idx_sync();
   auto ldOp = tcgen05::utcld<32, 32, kRepeatTimes>;
   auto stOp = tcgen05::utcst<32, 32, kRepeatTimes>;
-  auto tick = timestamp<false>;
+  auto probe = timestamp<false>;
 
   uint32_t r[kRepeatTimes];
 
@@ -91,14 +92,15 @@ CUTLASS_GLOBAL void tcgen05_ld_st_impl(void *sink, uint64_t *latency) {
   }
   __syncthreads();
 
-  uint64_t start = tick();
+  uint64_t start = 0, end = 0;
+  probe(start);
   CUTLASS_PRAGMA_UNROLL
   for (uint32_t i = 0; i < kLdStIters; ++i) {
     stOp(tmem_ptr + i * kLdStCols, r);
   }
   cutlass::arch::fence_view_async_tmem_store();
   __syncthreads();
-  uint64_t end = tick();
+  probe(end);
   if (cutlass::thread0()) {
     latency[0] = start;
     latency[1] = end;
@@ -106,7 +108,7 @@ CUTLASS_GLOBAL void tcgen05_ld_st_impl(void *sink, uint64_t *latency) {
 
   uint32_t checksum = 0;
   __syncthreads();
-  start = tick();
+  probe(start);
   CUTLASS_PRAGMA_UNROLL
   for (uint32_t i = 0; i < kLdStIters; ++i) {
     ldOp(tmem_ptr + i * kLdStCols, r);
@@ -114,7 +116,7 @@ CUTLASS_GLOBAL void tcgen05_ld_st_impl(void *sink, uint64_t *latency) {
   cutlass::arch::fence_view_async_tmem_load();
   checksum ^= r[0];
   __syncthreads();
-  end = tick();
+  probe(end);
   if (cutlass::thread0()) {
     latency[2] = start;
     latency[3] = end;

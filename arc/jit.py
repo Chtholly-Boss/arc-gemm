@@ -35,6 +35,10 @@ F = TypeVar("F", bound=Callable[..., Any])
 logger = logging.getLogger(__name__)
 
 
+def get_env(name: str) -> bool:
+    return name in os.environ
+
+
 def cache_once(fn: F) -> F:
     """
     NOTE: `functools.lru_cache` is not compatible with `torch.compile`

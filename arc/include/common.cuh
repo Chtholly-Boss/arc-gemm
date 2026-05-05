@@ -27,14 +27,15 @@
     }                                                                          \
   } while (0)
 
-template <bool UseGlobalTimer> __device__ __forceinline__ uint64_t timestamp() {
-  uint64_t t;
+template <bool UseGlobalTimer>
+__device__ __forceinline__ void timestamp(uint64_t &t) {
+#if defined(ARC_PROBE)
   if constexpr (UseGlobalTimer) {
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
   } else {
     asm volatile("mov.u64 %0, %%clock64;" : "=l"(t));
   }
-  return t;
+#endif
 }
 
 __device__ __forceinline__ uint32_t __smid() {
@@ -43,8 +44,7 @@ __device__ __forceinline__ uint32_t __smid() {
   return smid;
 }
 
-#define BLOG(fmt, ...)                                                         \
-  printf("#P[%u]#B[%u,%u,%u] " fmt, __smid(), blockIdx.x, blockIdx.y,          \
-         blockIdx.z, ##__VA_ARGS__)
-#define TLOG(fmt, ...)                                                         \
-  printf("#B[%u]T[%u] " fmt, blockIdx.x, threadIdx.x, ##__VA_ARGS__)
+#define ARC_DLOG(fmt, ...)                                                     \
+  printf("#P[%u]#B[%u,%u,%u]#T[%u,%u,%u] " fmt, __smid(), blockIdx.x,          \
+         blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y, threadIdx.z,        \
+         ##__VA_ARGS__)

@@ -21,6 +21,7 @@ def _load_tma_latency():
             ("tma_latency_ns", "arc::experiments::tma_latency<true>"),
         ],
         extra_dependencies=["cutlass"],
+        extra_cuda_cflags=["-DARC_PROBE"],
         extra_ldflags=["-lcuda"],
     )
 

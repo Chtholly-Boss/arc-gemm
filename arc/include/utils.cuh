@@ -4,7 +4,6 @@
 #include "cute/arch/copy_sm90_desc.hpp"
 #include "cute/arch/mma_sm100_desc.hpp"
 #include "cute/arch/mma_sm100_umma.hpp"
-#include "cute/arch/util.hpp"
 #include "cutlass/detail/helper_macros.hpp"
 
 namespace arc {
@@ -24,38 +23,6 @@ make_2d_tma_desc(cute::TmaDescriptor *desc, void *ptr, uint64_t height,
       CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
 
-CUTLASS_DEVICE cute::UMMA::SmemDescriptor
-make_umma_smem_desc(cute::UMMA::LayoutType layout_type, void *smem_ptr,
-                    uint32_t sbo, uint32_t lbo) {
-  cute::UMMA::SmemDescriptor desc;
-  desc.version_ = 1;
-  desc.lbo_mode_ = 0;
-  desc.layout_type_ = static_cast<uint8_t>(layout_type);
-  desc.start_address_ =
-      static_cast<uint16_t>(cute::cast_smem_ptr_to_uint(smem_ptr) >> 4);
-  desc.base_offset_ = 0;
-  desc.stride_byte_offset_ = sbo >> 4;
-  desc.leading_byte_offset_ = lbo >> 4;
-  return desc;
-}
-
-// TODO : support more swizzle pattern
-template <uint32_t BLOCK_MN, uint32_t BLOCK_K, typename dtype_t>
-CUTLASS_DEVICE cute::UMMA::SmemDescriptor
-make_umma_smem_desc_swizzle128B(dtype_t *base, uint32_t mn_idx,
-                                uint32_t k_idx) {
-  constexpr uint32_t kAtomBytes = 16;
-  constexpr uint32_t kSwizzleBytes = 128;
-  constexpr uint32_t kSwizzleK = kSwizzleBytes / sizeof(dtype_t);
-  static_assert(BLOCK_K % kSwizzleK == 0);
-
-  uint32_t k_slab = k_idx / kSwizzleK;
-  uint32_t k_in_slab = k_idx % kSwizzleK;
-  dtype_t *ptr =
-      base + k_slab * BLOCK_MN * kSwizzleK + mn_idx * kSwizzleK + k_in_slab;
-  return make_umma_smem_desc(cute::UMMA::LayoutType::SWIZZLE_128B, ptr,
-                             8 * kSwizzleBytes, kAtomBytes);
-}
 
 template <class a_type, class b_type, class c_type, int M, int N,
           cute::UMMA::Major a_major, cute::UMMA::Major b_major>

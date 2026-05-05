@@ -8,6 +8,7 @@ from .jit import (
     _get_default_target_flags,
     _jit_compile_context,
     cache_once,
+    get_env,
     get_cutlass_include_paths,
     hash_files,
 )
@@ -34,7 +35,8 @@ void matmul(tvm::ffi::TensorView a, tvm::ffi::TensorView b, tvm::ffi::TensorView
     make_2d_tma_desc(&b_desc, b.data_ptr(), n, k, {bn}, {swizzle_k}, CU_TENSOR_MAP_SWIZZLE_128B);
     make_2d_tma_desc(&cd_desc, out.data_ptr(), m, n, 32, {bn}, CU_TENSOR_MAP_SWIZZLE_NONE);
     cudaStream_t stream = static_cast<cudaStream_t>(TVMFFIEnvGetStream(out.device().device_type, out.device().device_id));
-    constexpr int smem_size = sizeof(SharedStorage<{bm}, {bn}, {bk}, {stages}>);
+    using SmemStorage = SharedStorage<{bm}, {bn}, {bk}, {stages}, cutlass::bfloat16_t, cutlass::bfloat16_t, cutlass::bfloat16_t>;
+    constexpr int smem_size = sizeof(SmemStorage);
     auto kernel = gemm_tcgen05_impl<{bm}, {bn}, {bk}, {stages}, {multicast}, {num_threads}>;
     CHECK_CUDA_ERROR(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     dim3 grid((m + {bm} - 1) / {bm}, (n + {bn} - 1) / {bn}, 1);
@@ -53,11 +55,12 @@ def _load_matmul():
         "include/utils.cuh",
         "include/common.cuh",
     )
+    probe = get_env("ARC_PROBE")
     with _jit_compile_context():
         return load_inline(
-            f"matmul_{source_hash}",
+            f"matmul_{source_hash}{'_probe' if probe else ''}",
             cuda_sources=[_instantiate((128, 128, 128), 3)],
-            extra_cuda_cflags=_get_default_target_flags(),
+            extra_cuda_cflags=_get_default_target_flags() + (["-DARC_PROBE"] if probe else []),
             extra_ldflags=["-lcuda"],
             extra_include_paths=DEFAULT_INCLUDE + get_cutlass_include_paths(),
         )
@@ -67,9 +70,7 @@ def matmul(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None) ->
     m, k = a.shape
     n, _k = b.shape
     assert k == _k, f"Inner dimensions must match: {k} vs {_k}"
-    assert m % 128 == 0 and n % 128 == 0 and k % 128 == 0, (
-        "matmul expects m, n, and k to be multiples of 128"
-    )
+    assert m % 128 == 0 and n % 128 == 0 and k % 128 == 0, "matmul expects m, n, and k to be multiples of 128"
     if out is None:
         out = torch.empty((m, n), dtype=torch.bfloat16, device=a.device)
     _load_matmul().matmul(a, b, out)

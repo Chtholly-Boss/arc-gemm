@@ -62,7 +62,7 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(tcgen05_cp, (arc::experiments::tcgen05_cp));
         return load_inline(
             f"tcgen05_cp_{source_hash}_iters{iters}",
             cuda_sources=[_instantiate()],
-            extra_cuda_cflags=_get_default_target_flags(),
+            extra_cuda_cflags=_get_default_target_flags() + ["-DARC_PROBE"],
             extra_ldflags=["-lcuda"],
             extra_include_paths=DEFAULT_INCLUDE + get_cutlass_include_paths(),
         )
@@ -100,7 +100,7 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(tcgen05_ld_st, (arc::experiments::tcgen05_ld_st));
         return load_inline(
             f"tcgen05_ldst_{source_hash}_iters{iters}_repeat{repeat_times}",
             cuda_sources=[_instantiate()],
-            extra_cuda_cflags=_get_default_target_flags(),
+            extra_cuda_cflags=_get_default_target_flags() + ["-DARC_PROBE"],
             extra_ldflags=["-lcuda"],
             extra_include_paths=DEFAULT_INCLUDE + get_cutlass_include_paths(),
         )
