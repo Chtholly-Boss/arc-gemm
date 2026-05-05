@@ -5,7 +5,7 @@
 #include "cutlass/arch/barrier.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/detail/helper_macros.hpp"
-#include "tcgen05.cuh"
+#include "ptx/tcgen05.cuh"
 #include "utils.cuh"
 #include <cstdint>
 

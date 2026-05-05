@@ -17,9 +17,7 @@ from arc.jit import (
 def _source_hash() -> str:
     return hash_files(
         "csrc/tcgen05.cu",
-        "include/tcgen05.cuh",
-        "include/utils.cuh",
-        "include/common.cuh",
+        "include/ptx/tcgen05.cuh",
     )
 
 

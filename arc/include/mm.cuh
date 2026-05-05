@@ -9,7 +9,7 @@
 #include "cutlass/bfloat16.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
-#include "tcgen05.cuh"
+#include "ptx/tcgen05.cuh"
 #include "utils.cuh"
 
 namespace arc {
